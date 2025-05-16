@@ -6,6 +6,7 @@ import json
 import re
 from openai import OpenAI
 
+
 # Configuración de la API Key
 key_ = st.secrets["llm"]["key_"]
 client = OpenAI(api_key=key_)
