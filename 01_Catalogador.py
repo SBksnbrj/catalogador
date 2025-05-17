@@ -11,7 +11,7 @@ from openai import OpenAI
 key_ = st.secrets["llm"]["key_"]
 client = OpenAI(api_key=key_)
 
-st.title("Catalogador de Datos - Chatbot")
+st.title("Catalogador de Datos - v1.0")
 
 # 1. Subida de archivo
 today = datetime.date.today().isoformat()
@@ -56,15 +56,18 @@ if uploaded_file:
 
         # Validación de correos electrónicos
         def es_email_valido(email):
-            patron = r"^[\w\.-]+@asbanc.com.pe"
+            patron = r"^[\w\.-]+@asbanc\.com\.pe$"
             return re.match(patron, email) is not None
 
-        data_steward_operativo_contact = st.text_input("Correo del data steward operativo:")
-        if data_steward_operativo_contact and not es_email_valido(data_steward_operativo_contact):
-            st.error("El correo del data steward operativo no es válido.")
-        data_steward_ejecutivo_contact = st.text_input("Correo del data steward ejecutivo:")
-        if data_steward_ejecutivo_contact and not es_email_valido(data_steward_ejecutivo_contact):
-            st.error("El correo del data steward ejecutivo no es válido.")
+        user_operativo = st.text_input("Usuario del data steward operativo (sin @asbanc.com.pe):")
+        data_steward_operativo_contact = f"{user_operativo}@asbanc.com.pe" if user_operativo else ""
+        if user_operativo and not es_email_valido(data_steward_operativo_contact):
+            st.error("El usuario del data steward operativo no es válido.")
+
+        user_ejecutivo = st.text_input("Usuario del data steward ejecutivo (sin @asbanc.com.pe):")
+        data_steward_ejecutivo_contact = f"{user_ejecutivo}@asbanc.com.pe" if user_ejecutivo else ""
+        if user_ejecutivo and not es_email_valido(data_steward_ejecutivo_contact):
+            st.error("El usuario del data steward ejecutivo no es válido.")
 
         data_privacy = st.selectbox("Privacidad de los datos:", ["Abierto", "Personales", "Cerrado"])
         location_path = st.text_input("Ruta o ubicación del archivo:")
