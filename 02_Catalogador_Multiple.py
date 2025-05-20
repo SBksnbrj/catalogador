@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from typing import List
 from enum import Enum
 import plotly.express as px
+import openpyxl
 
 # Configuración de la API Key
 key_ = st.secrets["llm"]["key_"]
@@ -17,8 +18,7 @@ client = OpenAI(api_key=key_)
 
 st.title("Catalogador de Múltiples Tablas - v1.0")
 
-# 1. Subida de múltiples archivos
-today = datetime.date.today().isoformat()
+
 
 class tipo_dato(str, Enum):
     texto, numero, fecha = "texto", "numero", "fecha"
@@ -35,22 +35,105 @@ class TableMetadata(BaseModel):
 TableMetadata.model_rebuild()  # This is required to enable recursive types
 
 @st.cache_data(show_spinner=False)
-def procesar_archivos(files, fecha):
+def procesar_archivos(files, selected_sheets_per_file):
     metadatos_list = []
     diccionarios_list = []
     table_names = []
+    # 1. Subida de múltiples archivos
+    fecha = str(datetime.date.today())  # <-- Convertir a string para evitar problemas de serialización
 
     for idx, uploaded_file in enumerate(files):
         file_name = uploaded_file.name
         file_format = file_name.split('.')[-1].lower()
-        df = None
-        if file_format == "csv":
-            df = pd.read_csv(uploaded_file)
-        elif file_format in ["xls", "xlsx"]:
-            df = pd.read_excel(uploaded_file)
+        # --- NUEVO: Si es Excel, dejar elegir pestañas ---
+        if file_format in ["xls", "xlsx"]:
+            xls = pd.ExcelFile(uploaded_file)
+            all_sheets = xls.sheet_names
+            # Si hay pestaña METADATOS o DICCIONARIO, marcarlo
+            tiene_metadatos = "METADATOS" in [s.upper() for s in all_sheets]
+            tiene_diccionario = "DICCIONARIO" in [s.upper() for s in all_sheets]
+            # Selección de pestañas a analizar
+            sheets_to_analyze = selected_sheets_per_file.get(file_name, [])
+            for sheet_name in sheets_to_analyze:
+                df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+                # Reemplazar NaT y NaN por string vacío para evitar problemas de serialización
+                df = df.where(pd.notnull(df), None)
+                df = df.replace({pd.NaT: None})
+                df = df.astype(object).where(pd.notnull(df), None)
+                # Convertir pandas.Timestamp a string para evitar problemas de serialización
+                df = df.map(lambda x: str(x) if isinstance(x, pd.Timestamp) else x)
+                table_id = f"T{str(len(metadatos_list)+1).zfill(3)}"
+                if not tiene_metadatos:
+                    muestra_tabla = df.sample(min(10, len(df)), random_state=1).to_dict(orient="list")
+                    prompt_dict = f"""
+                    Muestra de la tabla (formato JSON):
+                    {json.dumps(muestra_tabla, ensure_ascii=False)}
+                    """
+                    response = client.responses.parse(
+                        model="gpt-4o-mini",
+                        input=[
+                            {"role": "system", "content": "Eres un experto catalogador de datos. Analiza la siguiente muestra de una tabla y responde en **español**"},
+                            {"role": "user", "content": prompt_dict}
+                        ],
+                        text_format=TableMetadata,
+                    )
+                    dict_ia = response.output_parsed.dict()
+                    metadatos = {
+                        "table_id": table_id,
+                        "table_name": sheet_name,
+                        "table_description": dict_ia.get("table_description", ""),
+                        "format": file_format,
+                        "date_modified": fecha,
+                        "date_register": fecha,
+                        # Los siguientes campos quedan en blanco para edición manual:
+                        "data_privacy": "",
+                        "data_steward_operativo_contact": "",
+                        "data_steward_ejecutivo_contact": "",
+                        "domain": "",
+                        "data_owner_area": "",
+                        "location_path": "",
+                        "periodicity": "",
+                        "table_status": ""
+                    }
+                    metadatos_list.append(metadatos)
+                if not tiene_diccionario:
+                    if 'dict_ia' not in locals():
+                        muestra_tabla = df.sample(min(10, len(df)), random_state=1).to_dict(orient="list")
+                        prompt_dict = f"""
+                        Muestra de la tabla (formato JSON):
+                        {json.dumps(muestra_tabla, ensure_ascii=False)}
+                        """
+                        response = client.responses.parse(
+                            model="gpt-4o-mini",
+                            input=[
+                                {"role": "system", "content": "Eres un experto catalogador de datos. Analiza la siguiente muestra de una tabla y responde en **español**"},
+                                {"role": "user", "content": prompt_dict}
+                            ],
+                            text_format=TableMetadata,
+                        )
+                        dict_ia = response.output_parsed.dict()
+                    for i, col in enumerate(dict_ia.get("columns", [])):
+                        id_atributo = f"a{str(i+1).zfill(3)}"
+                        diccionarios_list.append({
+                            "table_id": table_id,
+                            "id_atributo": id_atributo,
+                            "Atributo": col.get("name", ""),
+                            "Descripción": col.get("description", ""),
+                            "Tipo de dato": col.get("type", "").replace("tipo_dato.", ""),
+                        })
+                table_names.append(sheet_name)
         else:
-            continue
-        if df is not None:
+            # CSV u otros formatos
+            df = pd.read_csv(uploaded_file)
+            # Reemplazar NaT, NaN y Timestamps por string vacío para evitar problemas de serialización
+            df = df.where(pd.notnull(df), None)
+            df = df.replace({pd.NaT: None})
+            for col in df.columns:
+                if pd.api.types.is_datetime64_any_dtype(df[col]):
+                    df[col] = df[col].astype(str).replace("NaT", "")
+            df = df.astype(object).where(pd.notnull(df), None)
+            sheet_name = file_name.split('.')[0]
+            table_id = f"T{str(len(metadatos_list)+1).zfill(3)}"
             muestra_tabla = df.sample(min(10, len(df)), random_state=1).to_dict(orient="list")
             prompt_dict = f"""
             Muestra de la tabla (formato JSON):
@@ -65,11 +148,6 @@ def procesar_archivos(files, fecha):
                 text_format=TableMetadata,
             )
             dict_ia = response.output_parsed.dict()
-            if file_format in ["xls", "xlsx"]:
-                sheet_name = uploaded_file.name.split('.')[0]
-            else:
-                sheet_name = file_name.split('.')[0]
-            table_id = f"T{str(idx+1).zfill(3)}"
             metadatos = {
                 "table_id": table_id,
                 "table_name": sheet_name,
@@ -100,15 +178,44 @@ def procesar_archivos(files, fecha):
             table_names.append(sheet_name)
     return metadatos_list, diccionarios_list, table_names
 
-uploaded_files = st.file_uploader("Sube tus archivos de datos (Excel, CSV, etc.)", type=["csv", "xlsx"], accept_multiple_files=True)
+# --- NUEVO: Solo Excel, cachear lectura de hojas y separar selección de pestañas del procesamiento ---
+@st.cache_data(show_spinner=False)
+def get_excel_sheets(uploaded_file):
+    xls = pd.ExcelFile(uploaded_file)
+    return xls.sheet_names
 
-# Para almacenar resultados
-metadatos_list = []
-diccionarios_list = []
-table_names = []
+uploaded_files = st.file_uploader("Sube tus archivos de datos (solo Excel .xlsx, .xls)", type=["xlsx", "xls"], accept_multiple_files=True)
 
+selected_sheets_per_file = {}
 if uploaded_files and len(uploaded_files) > 0:
-    metadatos_list, diccionarios_list, table_names = procesar_archivos(uploaded_files, today)
+    for idx, uploaded_file in enumerate(uploaded_files):
+        file_name = uploaded_file.name
+        all_sheets = get_excel_sheets(uploaded_file)
+        sheets_to_show = [s for s in all_sheets if s.upper() not in ["METADATOS", "DICCIONARIO"]]
+        key = f"sheets_{file_name}_{idx}"
+        selected = st.multiselect(
+            f"Selecciona las pestañas a analizar del archivo '{file_name}':",
+            sheets_to_show,
+            default=sheets_to_show,
+            key=key
+        )
+        selected_sheets_per_file[file_name] = selected
+    # --- Botón para procesar archivos ---
+    if st.button("Procesar archivos seleccionados"):
+        metadatos_list, diccionarios_list, table_names = procesar_archivos(uploaded_files, selected_sheets_per_file)
+        st.session_state['metadatos_list'] = metadatos_list
+        st.session_state['diccionarios_list'] = diccionarios_list
+        st.session_state['table_names'] = table_names
+else:
+    metadatos_list = []
+    diccionarios_list = []
+    table_names = []
+
+# --- Mostrar resultados si existen en session_state ---
+if 'metadatos_list' in st.session_state and st.session_state['metadatos_list']:
+    metadatos_list = st.session_state['metadatos_list']
+    diccionarios_list = st.session_state['diccionarios_list']
+    table_names = st.session_state['table_names']
     st.subheader("Completitud de metadatos por tabla")
     import streamlit as st
     from streamlit import column_config
@@ -116,10 +223,16 @@ if uploaded_files and len(uploaded_files) > 0:
     # Mostrar solo la parte de usuario para los correos en el editor
     for col in ["data_steward_operativo_contact", "data_steward_ejecutivo_contact"]:
         metadatos_df[col] = metadatos_df[col].str.replace("@asbanc.com.pe", "", regex=False)
-    # Editor de metadatos
+    # --- GESTIÓN DE ESTADO PARA METADATOS ---
+    if 'metadatos_edit_df' not in st.session_state:
+        st.session_state['metadatos_edit_df'] = metadatos_df.copy()
+
+    def guardar_metadatos():
+        st.session_state['metadatos_edit_df'] = st.session_state['meta_editor']
+
     metadatos_edit = st.data_editor(
-        metadatos_df,
-        num_rows="dynamic",
+        st.session_state['metadatos_edit_df'],
+        num_rows="static",
         key="meta_editor",
         column_config={
             "data_owner_area": st.column_config.SelectboxColumn(
@@ -176,6 +289,7 @@ if uploaded_files and len(uploaded_files) > 0:
             )
         }
     )
+
     # --- GRAFICO DE COMPLETITUD ---
     campos_a_evaluar = [
         "table_id", "table_name", "table_description", "format", "date_modified", "date_register",
@@ -218,17 +332,36 @@ if uploaded_files and len(uploaded_files) > 0:
 
     st.subheader("Diccionario de datos por tabla")
     selected_table = st.selectbox("Selecciona una tabla para ver su diccionario", table_names)
-    diccionario_df = pd.DataFrame([d for d in diccionarios_list if d["table_id"] == metadatos_df.loc[metadatos_df["table_name"] == selected_table, "table_id"].values[0]])
+    table_id_selected = metadatos_df.loc[metadatos_df["table_name"] == selected_table, "table_id"].values[0]
+    diccionario_df = pd.DataFrame([d for d in diccionarios_list if d["table_id"] == table_id_selected])
+    # --- GESTIÓN DE ESTADO PARA DICCIONARIO DE DATOS ---
+    if 'diccionario_edit_dict' not in st.session_state:
+        st.session_state['diccionario_edit_dict'] = {}
+    if table_id_selected not in st.session_state['diccionario_edit_dict']:
+        st.session_state['diccionario_edit_dict'][table_id_selected] = diccionario_df.copy()
+    # Si por error hay una lista, conviértela a DataFrame
+    if not isinstance(st.session_state['diccionario_edit_dict'][table_id_selected], pd.DataFrame):
+        st.session_state['diccionario_edit_dict'][table_id_selected] = pd.DataFrame(st.session_state['diccionario_edit_dict'][table_id_selected])
 
-    # Asignar un color distinto a cada valor de "Tipo de dato" NOT POSSIBLE RIGHT NOW
-    # tipo_colores = {"texto": "#e6f7ff", "numero": "#e6ffe6", "fecha": "#fff5e6"}
-    # def color_tipo(val):
-    #     return f'background-color: {tipo_colores.get(val, "#ffffff")}'
-    # diccionario_df_styled = diccionario_df.style.applymap(color_tipo, subset=["Tipo de dato"])
+    def guardar_diccionario():
+        changes = st.session_state.get(f'diccionario_editor_{selected_table}', {})
+        df = st.session_state['diccionario_edit_dict'][table_id_selected].copy()
+        # Aplicar cambios de edición
+        for idx, row_changes in changes.get('edited_rows', {}).items():
+            for col, val in row_changes.items():
+                df.at[idx, col] = val
+        # Agregar filas nuevas
+        for row in changes.get('added_rows', []):
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        # Eliminar filas
+        if changes.get('deleted_rows'):
+            df = df.drop(changes['deleted_rows']).reset_index(drop=True)
+        st.session_state['diccionario_edit_dict'][table_id_selected] = df
+
     diccionario_edit = st.data_editor(
-        diccionario_df,
+        st.session_state['diccionario_edit_dict'][table_id_selected],
         use_container_width=True,
-        num_rows="dynamic",
+        num_rows="static",
         key=f"diccionario_editor_{selected_table}",
         column_config={
             "id_atributo": st.column_config.TextColumn("ID de atributo", disabled=True),
@@ -236,25 +369,30 @@ if uploaded_files and len(uploaded_files) > 0:
                 "Tipo de dato",
                 options=["texto", "numero", "fecha"]
             )
-        }
+        },
+        on_change=guardar_diccionario
     )
-    
-    print(diccionario_df)
 
-    # Al descargar, concatenar el dominio a los correos
-    def to_excel(metadatos, diccionarios):
+    # Al descargar, usar los datos editados
+    def to_excel(metadatos, diccionarios_dict):
         metadatos = metadatos.copy()
+        # Eliminar columna de completitud si existe
+        if '% Completitud' in metadatos.columns:
+            metadatos = metadatos.drop(columns=['% Completitud'])
         for col in ["data_steward_operativo_contact", "data_steward_ejecutivo_contact"]:
             metadatos[col] = metadatos[col].astype(str).str.strip() + "@asbanc.com.pe"
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             metadatos.to_excel(writer, index=False, sheet_name='Metadatos')
-            pd.DataFrame(diccionarios).to_excel(writer, index=False, sheet_name='Diccionario')
+            # Concatenar todos los diccionarios editados
+            diccionarios_concat = pd.concat(list(diccionarios_dict.values()), ignore_index=True)
+            diccionarios_concat.to_excel(writer, index=False, sheet_name='Diccionario')
         output.seek(0)
         return output
 
     if st.button("Descargar metadatos y diccionarios consolidados"):
-        excel_bytes = to_excel(metadatos_edit, diccionarios_list)
+        # Usar el DataFrame editado y mostrado en pantalla
+        excel_bytes = to_excel(metadatos_edit, st.session_state['diccionario_edit_dict'])
         st.download_button(
             label="Descargar Excel",
             data=excel_bytes,
