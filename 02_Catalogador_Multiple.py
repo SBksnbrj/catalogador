@@ -374,25 +374,33 @@ if 'metadatos_list' in st.session_state and st.session_state['metadatos_list']:
     )
 
     # Al descargar, usar los datos editados
-    def to_excel(metadatos, diccionarios_dict):
+    def to_excel(metadatos, diccionarios_dict, diccionarios_list, metadatos_df):
         metadatos = metadatos.copy()
         # Eliminar columna de completitud si existe
         if '% Completitud' in metadatos.columns:
             metadatos = metadatos.drop(columns=['% Completitud'])
         for col in ["data_steward_operativo_contact", "data_steward_ejecutivo_contact"]:
             metadatos[col] = metadatos[col].astype(str).str.strip() + "@asbanc.com.pe"
+        # --- Concatenar todos los diccionarios, editados o no ---
+        diccionarios_all = []
+        for idx, row in metadatos_df.iterrows():
+            table_id = row['table_id']
+            if table_id in diccionarios_dict:
+                df_dic = diccionarios_dict[table_id]
+            else:
+                # Si nunca fue editado, usar el original
+                df_dic = pd.DataFrame([d for d in diccionarios_list if d["table_id"] == table_id])
+            diccionarios_all.append(df_dic)
+        diccionarios_concat = pd.concat(diccionarios_all, ignore_index=True)
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             metadatos.to_excel(writer, index=False, sheet_name='Metadatos')
-            # Concatenar todos los diccionarios editados
-            diccionarios_concat = pd.concat(list(diccionarios_dict.values()), ignore_index=True)
             diccionarios_concat.to_excel(writer, index=False, sheet_name='Diccionario')
         output.seek(0)
         return output
 
     if st.button("Descargar metadatos y diccionarios consolidados"):
-        # Usar el DataFrame editado y mostrado en pantalla
-        excel_bytes = to_excel(metadatos_edit, st.session_state['diccionario_edit_dict'])
+        excel_bytes = to_excel(metadatos_edit, st.session_state['diccionario_edit_dict'], diccionarios_list, metadatos_df)
         st.download_button(
             label="Descargar Excel",
             data=excel_bytes,
