@@ -35,36 +35,33 @@ class TableMetadata(BaseModel):
 TableMetadata.model_rebuild()  # This is required to enable recursive types
 
 @st.cache_data(show_spinner=False)
-def procesar_archivos(files, selected_sheets_per_file):
+def procesar_archivos(files, selected_sheets_per_file, user_context):
     metadatos_list = []
     diccionarios_list = []
     table_names = []
-    # 1. Subida de múltiples archivos
-    fecha = str(datetime.date.today())  # <-- Convertir a string para evitar problemas de serialización
-
+    fecha = str(datetime.date.today())
     for idx, uploaded_file in enumerate(files):
         file_name = uploaded_file.name
         file_format = file_name.split('.')[-1].lower()
-        # --- NUEVO: Si es Excel, dejar elegir pestañas ---
         if file_format in ["xls", "xlsx"]:
             xls = pd.ExcelFile(uploaded_file)
             all_sheets = xls.sheet_names
-            # Si hay pestaña METADATOS o DICCIONARIO, marcarlo
             tiene_metadatos = "METADATOS" in [s.upper() for s in all_sheets]
             tiene_diccionario = "DICCIONARIO" in [s.upper() for s in all_sheets]
-            # Selección de pestañas a analizar
             sheets_to_analyze = selected_sheets_per_file.get(file_name, [])
             for sheet_name in sheets_to_analyze:
                 df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
-                # Reemplazar NaT y NaN por string vacío para evitar problemas de serialización
                 df = df.where(pd.notnull(df), None)
                 df = df.replace({pd.NaT: None})
                 df = df.astype(object).where(pd.notnull(df), None)
-                # Convertir pandas.Timestamp a string para evitar problemas de serialización
                 df = df.map(lambda x: str(x) if isinstance(x, pd.Timestamp) else x)
                 table_id = f"T{str(len(metadatos_list)+1).zfill(3)}"
                 if not tiene_metadatos:
                     muestra_tabla = df.sample(min(10, len(df)), random_state=1).to_dict(orient="list")
+                    # --- Incluir contexto del usuario en el prompt del sistema ---
+                    system_msg = "Eres un experto catalogador de datos. Analiza la siguiente muestra de una tabla y responde en **español**."
+                    if user_context and user_context.strip():
+                        system_msg += f"\n\nContexto adicional proporcionado por el usuario para mejorar la catalogación: {user_context.strip()}"
                     prompt_dict = f"""
                     Muestra de la tabla (formato JSON):
                     {json.dumps(muestra_tabla, ensure_ascii=False)}
@@ -72,20 +69,20 @@ def procesar_archivos(files, selected_sheets_per_file):
                     response = client.responses.parse(
                         model="gpt-4o-mini",
                         input=[
-                            {"role": "system", "content": "Eres un experto catalogador de datos. Analiza la siguiente muestra de una tabla y responde en **español**"},
+                            {"role": "system", "content": system_msg},
                             {"role": "user", "content": prompt_dict}
                         ],
                         text_format=TableMetadata,
                     )
                     dict_ia = response.output_parsed.dict()
                     metadatos = {
+                        "file_name": file_name,
                         "table_id": table_id,
                         "table_name": sheet_name,
                         "table_description": dict_ia.get("table_description", ""),
                         "format": file_format,
                         "date_modified": fecha,
                         "date_register": fecha,
-                        # Los siguientes campos quedan en blanco para edición manual:
                         "data_privacy": "",
                         "data_steward_operativo_contact": "",
                         "data_steward_ejecutivo_contact": "",
@@ -99,6 +96,9 @@ def procesar_archivos(files, selected_sheets_per_file):
                 if not tiene_diccionario:
                     if 'dict_ia' not in locals():
                         muestra_tabla = df.sample(min(10, len(df)), random_state=1).to_dict(orient="list")
+                        system_msg = "Eres un experto catalogador de datos. Analiza la siguiente muestra de una tabla y responde en **español**."
+                        if user_context and user_context.strip():
+                            system_msg += f"\n\nContexto adicional proporcionado por el usuario para mejorar la catalogación: {user_context.strip()}"
                         prompt_dict = f"""
                         Muestra de la tabla (formato JSON):
                         {json.dumps(muestra_tabla, ensure_ascii=False)}
@@ -106,7 +106,7 @@ def procesar_archivos(files, selected_sheets_per_file):
                         response = client.responses.parse(
                             model="gpt-4o-mini",
                             input=[
-                                {"role": "system", "content": "Eres un experto catalogador de datos. Analiza la siguiente muestra de una tabla y responde en **español**"},
+                                {"role": "system", "content": system_msg},
                                 {"role": "user", "content": prompt_dict}
                             ],
                             text_format=TableMetadata,
@@ -115,6 +115,8 @@ def procesar_archivos(files, selected_sheets_per_file):
                     for i, col in enumerate(dict_ia.get("columns", [])):
                         id_atributo = f"a{str(i+1).zfill(3)}"
                         diccionarios_list.append({
+                            "file_name": file_name,
+                            "table_name": sheet_name,
                             "table_id": table_id,
                             "id_atributo": id_atributo,
                             "Atributo": col.get("name", ""),
@@ -149,6 +151,7 @@ def procesar_archivos(files, selected_sheets_per_file):
             )
             dict_ia = response.output_parsed.dict()
             metadatos = {
+                "file_name": file_name,  # NUEVO: nombre de archivo al inicio
                 "table_id": table_id,
                 "table_name": sheet_name,
                 "table_description": dict_ia.get("table_description", ""),
@@ -169,6 +172,8 @@ def procesar_archivos(files, selected_sheets_per_file):
             for i, col in enumerate(dict_ia.get("columns", [])):
                 id_atributo = f"a{str(i+1).zfill(3)}"
                 diccionarios_list.append({
+                    "file_name": file_name,  # NUEVO: nombre de archivo al inicio
+                    "table_name": sheet_name,  # NUEVO: nombre de tabla al inicio
                     "table_id": table_id,
                     "id_atributo": id_atributo,
                     "Atributo": col.get("name", ""),
@@ -187,7 +192,13 @@ def get_excel_sheets(uploaded_file):
 uploaded_files = st.file_uploader("Sube tus archivos de datos (solo Excel .xlsx, .xls)", type=["xlsx", "xls"], accept_multiple_files=True)
 
 selected_sheets_per_file = {}
+# NUEVO: Cuadro de texto para contexto de catalogación
+user_context = ""
 if uploaded_files and len(uploaded_files) > 0:
+    user_context = st.text_area(
+        "Agrega aquí contexto adicional para la catalogación de las tablas (por ejemplo: propósito del archivo, reglas de negocio, definiciones, aclaraciones, etc.)",
+        help="Este texto será enviado al modelo para mejorar la descripción de las tablas y atributos."
+    )
     for idx, uploaded_file in enumerate(uploaded_files):
         file_name = uploaded_file.name
         all_sheets = get_excel_sheets(uploaded_file)
@@ -202,7 +213,7 @@ if uploaded_files and len(uploaded_files) > 0:
         selected_sheets_per_file[file_name] = selected
     # --- Botón para procesar archivos ---
     if st.button("Procesar archivos seleccionados"):
-        metadatos_list, diccionarios_list, table_names = procesar_archivos(uploaded_files, selected_sheets_per_file)
+        metadatos_list, diccionarios_list, table_names = procesar_archivos(uploaded_files, selected_sheets_per_file, user_context)
         st.session_state['metadatos_list'] = metadatos_list
         st.session_state['diccionarios_list'] = diccionarios_list
         st.session_state['table_names'] = table_names
