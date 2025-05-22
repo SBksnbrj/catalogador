@@ -50,7 +50,7 @@ def procesar_archivos(files, selected_sheets_per_file, user_context):
             tiene_diccionario = "DICCIONARIO" in [s.upper() for s in all_sheets]
             sheets_to_analyze = selected_sheets_per_file.get(file_name, [])
             for sheet_name in sheets_to_analyze:
-                df = pd.read_excel(uploaded_file, sheet_name=sheet_name)
+                df = pd.read_excel(uploaded_file, sheet_name=sheet_name, dtype=str)
                 df = df.where(pd.notnull(df), None)
                 df = df.replace({pd.NaT: None})
                 df = df.astype(object).where(pd.notnull(df), None)
