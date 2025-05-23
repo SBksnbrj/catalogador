@@ -46,8 +46,6 @@ def procesar_archivos(files, selected_sheets_per_file, user_context):
         if file_format in ["xls", "xlsx"]:
             xls = pd.ExcelFile(uploaded_file)
             all_sheets = xls.sheet_names
-            tiene_metadatos = "METADATOS" in [s.upper() for s in all_sheets]
-            tiene_diccionario = "DICCIONARIO" in [s.upper() for s in all_sheets]
             sheets_to_analyze = selected_sheets_per_file.get(file_name, [])
             for sheet_name in sheets_to_analyze:
                 df = pd.read_excel(uploaded_file, sheet_name=sheet_name, dtype=str)
@@ -56,9 +54,44 @@ def procesar_archivos(files, selected_sheets_per_file, user_context):
                 df = df.astype(object).where(pd.notnull(df), None)
                 df = df.map(lambda x: str(x) if isinstance(x, pd.Timestamp) else x)
                 table_id = f"T{str(len(metadatos_list)+1).zfill(3)}"
-                if not tiene_metadatos:
+                muestra_tabla = df.sample(min(10, len(df)), random_state=1).to_dict(orient="list")
+                # --- Incluir contexto del usuario en el prompt del sistema ---
+                system_msg = "Eres un experto catalogador de datos. Analiza la siguiente muestra de una tabla y responde en **español**."
+                if user_context and user_context.strip():
+                    system_msg += f"\n\nContexto adicional proporcionado por el usuario para mejorar la catalogación: {user_context.strip()}"
+                prompt_dict = f"""
+                Muestra de la tabla (formato JSON):
+                {json.dumps(muestra_tabla, ensure_ascii=False)}
+                """
+                response = client.responses.parse(
+                    model="gpt-4o-mini",
+                    input=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": prompt_dict}
+                    ],
+                    text_format=TableMetadata,
+                )
+                dict_ia = response.output_parsed.dict()
+                metadatos = {
+                    "file_name": file_name,
+                    "table_id": table_id,
+                    "table_name": sheet_name,
+                    "table_description": dict_ia.get("table_description", ""),
+                    "format": file_format,
+                    "date_modified": fecha,
+                    "date_register": fecha,
+                    "data_privacy": "",
+                    "data_steward_operativo_contact": "",
+                    "data_steward_ejecutivo_contact": "",
+                    "domain": "",
+                    "data_owner_area": "",
+                    "location_path": "",
+                    "periodicity": "",
+                    "table_status": ""
+                }
+                metadatos_list.append(metadatos)
+                if 'dict_ia' not in locals():
                     muestra_tabla = df.sample(min(10, len(df)), random_state=1).to_dict(orient="list")
-                    # --- Incluir contexto del usuario en el prompt del sistema ---
                     system_msg = "Eres un experto catalogador de datos. Analiza la siguiente muestra de una tabla y responde en **español**."
                     if user_context and user_context.strip():
                         system_msg += f"\n\nContexto adicional proporcionado por el usuario para mejorar la catalogación: {user_context.strip()}"
@@ -75,54 +108,17 @@ def procesar_archivos(files, selected_sheets_per_file, user_context):
                         text_format=TableMetadata,
                     )
                     dict_ia = response.output_parsed.dict()
-                    metadatos = {
+                for i, col in enumerate(dict_ia.get("columns", [])):
+                    id_atributo = f"a{str(i+1).zfill(3)}"
+                    diccionarios_list.append({
                         "file_name": file_name,
-                        "table_id": table_id,
                         "table_name": sheet_name,
-                        "table_description": dict_ia.get("table_description", ""),
-                        "format": file_format,
-                        "date_modified": fecha,
-                        "date_register": fecha,
-                        "data_privacy": "",
-                        "data_steward_operativo_contact": "",
-                        "data_steward_ejecutivo_contact": "",
-                        "domain": "",
-                        "data_owner_area": "",
-                        "location_path": "",
-                        "periodicity": "",
-                        "table_status": ""
-                    }
-                    metadatos_list.append(metadatos)
-                if not tiene_diccionario:
-                    if 'dict_ia' not in locals():
-                        muestra_tabla = df.sample(min(10, len(df)), random_state=1).to_dict(orient="list")
-                        system_msg = "Eres un experto catalogador de datos. Analiza la siguiente muestra de una tabla y responde en **español**."
-                        if user_context and user_context.strip():
-                            system_msg += f"\n\nContexto adicional proporcionado por el usuario para mejorar la catalogación: {user_context.strip()}"
-                        prompt_dict = f"""
-                        Muestra de la tabla (formato JSON):
-                        {json.dumps(muestra_tabla, ensure_ascii=False)}
-                        """
-                        response = client.responses.parse(
-                            model="gpt-4o-mini",
-                            input=[
-                                {"role": "system", "content": system_msg},
-                                {"role": "user", "content": prompt_dict}
-                            ],
-                            text_format=TableMetadata,
-                        )
-                        dict_ia = response.output_parsed.dict()
-                    for i, col in enumerate(dict_ia.get("columns", [])):
-                        id_atributo = f"a{str(i+1).zfill(3)}"
-                        diccionarios_list.append({
-                            "file_name": file_name,
-                            "table_name": sheet_name,
-                            "table_id": table_id,
-                            "id_atributo": id_atributo,
-                            "Atributo": col.get("name", ""),
-                            "Descripción": col.get("description", ""),
-                            "Tipo de dato": col.get("type", "").replace("tipo_dato.", ""),
-                        })
+                        "table_id": table_id,
+                        "id_atributo": id_atributo,
+                        "Atributo": col.get("name", ""),
+                        "Descripción": col.get("description", ""),
+                        "Tipo de dato": col.get("type", "").replace("tipo_dato.", ""),
+                    })
                 table_names.append(sheet_name)
         else:
             # CSV u otros formatos
