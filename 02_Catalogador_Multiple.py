@@ -7,7 +7,7 @@ import re
 from openai import OpenAI
 from io import BytesIO
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Dict
 from enum import Enum
 import plotly.express as px
 import openpyxl
@@ -16,7 +16,7 @@ import openpyxl
 key_ = st.secrets["llm"]["key_"]
 client = OpenAI(api_key=key_)
 
-st.title("Catalogador de Múltiples Tablas - v1.0")
+st.title("Catalogador de Múltiples Tablas - v2.0")
 
 
 
@@ -27,12 +27,21 @@ class Column(BaseModel):
     name: str  # Nombre de la columna
     description: str  # Breve descripción del significado de la columna
     type: tipo_dato
+    new_name: str | None = None  # Nuevo nombre sugerido en Pascal_Snake_Case y en base al contenido de la columna, o None si no hay recomendación
+    reason: str | None = None  # Razón de la sugerencia del new_name, si aplica
 
 class TableMetadata(BaseModel):
     table_description: str  # Descripción general de la tabla (máx 500 caracteres)
     columns: List[Column]
 
 TableMetadata.model_rebuild()  # This is required to enable recursive types
+
+# --- NUEVO: Función para verificar si la tabla tiene columna identificador único ---
+def tiene_columna_id(df):
+    for col in df.columns:
+        if df[col].is_unique and df[col].notnull().all():
+            return col
+    return "No tiene"
 
 @st.cache_data(show_spinner=False)
 def procesar_archivos(files, selected_sheets_per_file, user_context):
@@ -71,6 +80,8 @@ def procesar_archivos(files, selected_sheets_per_file, user_context):
                 text_format=TableMetadata,
             )
             dict_ia = response.output_parsed.dict()
+            # --- Verificar si la tabla tiene columna identificador único ---
+            nombre_id = tiene_columna_id(df)
             metadatos = {
                 "file_name": file_name,
                 "table_id": table_id,
@@ -86,7 +97,8 @@ def procesar_archivos(files, selected_sheets_per_file, user_context):
                 "data_owner_area": "",
                 "location_path": "",
                 "periodicity": "Ad hoc (sin frecuencia fija)",
-                "table_status": "Activa"
+                "table_status": "Activa",
+                "Columna_ID": nombre_id,  # NUEVO: columna al final
             }
             metadatos_list.append(metadatos)
             if 'dict_ia' not in locals():
@@ -117,6 +129,8 @@ def procesar_archivos(files, selected_sheets_per_file, user_context):
                     "Atributo": col.get("name", ""),
                     "Descripción": col.get("description", ""),
                     "Tipo de dato": col.get("type", "").replace("tipo_dato.", ""),
+                    "column_rename_suggestion": col.get("new_name", ""),
+                    "reason": col.get("reason", ""),
                 })
             table_names.append(sheet_name)
     return metadatos_list, diccionarios_list, table_names
@@ -356,3 +370,168 @@ if 'metadatos_list' in st.session_state and st.session_state['metadatos_list']:
             file_name="catalogo_metadatos_diccionario.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+    # --- INFORME MARKDOWN ---
+    import io
+    from datetime import date
+
+    # Helper function to convert DataFrame to HTML table with black borders
+    def df_to_html_table(df):
+        if df.empty:
+            return ""
+        return df.to_html(index=False, border=1, classes="black-border-table", escape=False)
+
+    # CSS for black borders
+    st.markdown("""
+    <style>
+    .black-border-table, .black-border-table th, .black-border-table td {
+        border: 2px solid black !important;
+        border-collapse: collapse !important;
+        padding: 4px 8px !important;
+        text-align: left !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    df_file_tables = metadatos_edit[['file_name', 'table_name']].groupby('file_name').agg({'table_name':'nunique'}).reset_index().rename(columns={'table_name':'Nro_tablas'})
+    tabla1_html = df_to_html_table(df_file_tables)
+
+    df_file_table_attrs = pd.DataFrame(diccionarios_list).groupby(['file_name','table_name']).agg({'Atributo':'count'}).reset_index().rename(columns={'Atributo':'Nro_atributos'})
+    tabla2_html = df_to_html_table(df_file_table_attrs)
+
+    df_id = metadatos_edit[['file_name','table_name','Columna_ID']].rename(columns={'Columna_ID':'ID_identificado'})
+    # Agregar estilos de color según el valor de ID_identificado
+    def color_id(val):
+        if val == "No tiene":
+            return 'background-color: #ffcccc; border: 2px solid black !important;'  # rojo claro + borde negro
+        else:
+            return 'background-color: #ccffcc; border: 2px solid black !important;'  # verde claro + borde negro
+
+    # Aplicar estilos solo a la columna ID_identificado
+    styled_df_id = df_id.style.applymap(color_id, subset=['ID_identificado'])
+    # Convertir a HTML con estilos embebidos y bordes negros
+    tabla3_html = styled_df_id.to_html(
+        index=False,
+        border=1,
+        classes="black-border-table",
+        escape=False
+    )
+    # Asegurar que todos los bordes sean negros (sobrescribir posibles estilos por defecto)
+    tabla3_html = tabla3_html.replace(
+        '<table ',
+        '<table style="border:2px solid black;border-collapse:collapse;" '
+    ).replace(
+        '<th ',
+        '<th style="border:2px solid black;" '
+    ).replace(
+        '<td ',
+        '<td style="border:2px solid black;" '
+    )
+
+    df_roles = metadatos_edit[['file_name','table_name','data_owner_area','data_steward_operativo_contact','data_steward_ejecutivo_contact']]
+    tabla4_html = df_to_html_table(df_roles)
+
+    df_dicc = pd.DataFrame(diccionarios_list)
+    df_renames = df_dicc[df_dicc['column_rename_suggestion'].notnull() & (df_dicc['column_rename_suggestion'] != '')]
+    if not df_renames.empty:
+        tabla5_html = df_to_html_table(
+            df_renames[['file_name','table_name','Atributo','column_rename_suggestion']]
+            .rename(columns={'Atributo':'Atributo_original','column_rename_suggestion':'Nuevo_nombre_propuesto'})
+        )
+    else:
+        tabla5_html = '<p>No hay propuestas de renombre.</p>'
+
+    FECHA_GENERACION = date.today().strftime('%d/%m/%Y')
+    NUM_TABLAS = metadatos_edit['table_name'].nunique()
+    NUM_ATRIBUTOS = df_dicc['Atributo'].nunique()
+
+    markdown_report = f"""
+---
+# <b>INFORME DE RESULTADOS</b>
+
+Procesamiento Automático de Metadatos y Descripciones de Tablas
+
+<b>Fecha de generación: {FECHA_GENERACION}</b>
+
+---
+
+### I. Resumen ejecutivo
+
+Durante el proceso se analizaron <b>{NUM_TABLAS}</b> tablas que contienen <b>{NUM_ATRIBUTOS}</b> atributos. Se generaron descripciones automáticas, se verificó la presencia de identificadores de registro, se asignaron/validaron responsables de gobierno de datos y se propusieron nombres para los atributos que carecían de denominación.
+
+---
+
+### III. Resultados detallados
+
+1. <b>Descripciones generadas</b>
+
+{tabla1_html}
+    
+{tabla2_html}
+
+2. <b>Identificación de IDs de registro</b>
+
+{tabla3_html}
+
+3. <b>Asignación de roles de Gobierno de Datos</b>
+
+{tabla4_html}
+
+4. <b>Propuestas de nomenclatura para atributos sin nombre</b>
+
+{tabla5_html}
+
+---
+
+### IV. Recomendaciones inmediatas
+
+1. <b>Validar descripciones</b>: Revisar y aprobar las descripciones generadas para asegurar precisión semántica y alineación con el glosario corporativo.
+2. <b>Crear/normalizar IDs</b>: Asignar identificadores únicos a las tablas que carecen de ellos para garantizar trazabilidad.
+3. <b>Confirmar responsables</b>: Verificar la asignación de Data Stewards y Data Owners para cada tabla y actualizar en caso de cambios organizacionales.
+4. <b>Revisar nombres propuestos</b>: Aceptar o ajustar las sugerencias de nombre de atributos, asegurando consistencia con los estándares de nomenclatura. Verificar si no existen procesos automatizados que impidan el cambio del nombre del atributo.
+
+---
+
+### V. Próximos pasos
+
+<table class="black-border-table">
+<thead>
+<tr>
+<th>Fase</th>
+<th>Acción</th>
+<th>Responsable</th>
+<th>Fecha objetivo</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Validación de descripciones y nombres propuestos</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
+<td>2</td>
+<td>Actualización de metadatos en el Catálogo de datos</td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+
+---
+
+### VI. Anexos
+
+<ul>
+<li><b>A1. Metadatos y Diccionario de datos</b></li>
+<li><b>A2. Datos técnicos de automatización</b>
+    <ol>
+        <li><b>Fuente de los datos</b>:</li>
+        <li><b>Versión del modelo de IA utilizada</b>: ChatGPT-4.1-mini</li>
+        <li><b>Versión de la App</b>: v2.0</li>
+    </ol>
+</li>
+</ul>
+---
+"""
+    st.markdown(markdown_report, unsafe_allow_html=True)
