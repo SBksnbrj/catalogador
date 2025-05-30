@@ -43,6 +43,15 @@ def tiene_columna_id(df):
             return col
     return "No tiene"
 
+# usar_ia = st.session_state.get("usar_ia", None)
+# if usar_ia is None:
+usar_ia = st.checkbox(
+    f"¿Generar descripciones automáticas con IA para las tablas?",
+    value=True,
+    key=f"usar_ia"
+)
+# st.session_state["usar_ia"] = usar_ia
+
 @st.cache_data(show_spinner=False)
 def procesar_archivos(files, selected_sheets_per_file, user_context):
     metadatos_list = []
@@ -64,22 +73,39 @@ def procesar_archivos(files, selected_sheets_per_file, user_context):
             table_id = f"T{str(len(metadatos_list)+1).zfill(3)}"
             muestra_tabla = df.sample(min(10, len(df)), random_state=1).to_dict(orient="list")
             # --- Incluir contexto del usuario en el prompt del sistema ---
-            system_msg = "Eres un experto catalogador de datos. Analiza la siguiente muestra de una tabla y responde en **español**."
-            if user_context and user_context.strip():
-                system_msg += f"\n\nContexto adicional proporcionado por el usuario para mejorar la catalogación: {user_context.strip()}"
-            prompt_dict = f"""
-            Muestra de la tabla (formato JSON):
-            {json.dumps(muestra_tabla, ensure_ascii=False)}
-            """
-            response = client.responses.parse(
-                model="gpt-4o-mini",
-                input=[
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": prompt_dict}
-                ],
-                text_format=TableMetadata,
-            )
-            dict_ia = response.output_parsed.dict()
+            # --- Opción para usar IA o no ---
+            
+            if usar_ia:
+                system_msg = "Eres un experto catalogador de datos. Analiza la siguiente muestra de una tabla y responde en **español**."
+                if user_context and user_context.strip():
+                    system_msg += f"\n\nContexto adicional proporcionado por el usuario para mejorar la catalogación: {user_context.strip()}"
+                prompt_dict = f"""
+                Muestra de la tabla (formato JSON):
+                {json.dumps(muestra_tabla, ensure_ascii=False)}
+                """
+                response = client.responses.parse(
+                    model="gpt-4o-mini",
+                    input=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": prompt_dict}
+                    ],
+                    text_format=TableMetadata,
+                )
+                dict_ia = response.output_parsed.dict()
+            else:
+                # Generar estructura vacía con los mismos keys
+                dict_ia = {
+                    "table_description": "",
+                    "columns": [
+                        {
+                            "name": col,
+                            "description": "",
+                            "type": "",
+                            "new_name": "",
+                            "reason": ""
+                        } for col in df.columns
+                    ]
+                }
             # --- Verificar si la tabla tiene columna identificador único ---
             nombre_id = tiene_columna_id(df)
             metadatos = {
@@ -101,24 +127,24 @@ def procesar_archivos(files, selected_sheets_per_file, user_context):
                 "Columna_ID": nombre_id,  # NUEVO: columna al final
             }
             metadatos_list.append(metadatos)
-            if 'dict_ia' not in locals():
-                muestra_tabla = df.sample(min(10, len(df)), random_state=1).to_dict(orient="list")
-                system_msg = "Eres un experto catalogador de datos. Analiza la siguiente muestra de una tabla y responde en **español**."
-                if user_context and user_context.strip():
-                    system_msg += f"\n\nContexto adicional proporcionado por el usuario para mejorar la catalogación: {user_context.strip()}"
-                prompt_dict = f"""
-                Muestra de la tabla (formato JSON):
-                {json.dumps(muestra_tabla, ensure_ascii=False)}
-                """
-                response = client.responses.parse(
-                    model="gpt-4o-mini",
-                    input=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": prompt_dict}
-                    ],
-                    text_format=TableMetadata,
-                )
-                dict_ia = response.output_parsed.dict()
+            # if 'dict_ia' not in locals():
+            #     muestra_tabla = df.sample(min(10, len(df)), random_state=1).to_dict(orient="list")
+            #     system_msg = "Eres un experto catalogador de datos. Analiza la siguiente muestra de una tabla y responde en **español**."
+            #     if user_context and user_context.strip():
+            #         system_msg += f"\n\nContexto adicional proporcionado por el usuario para mejorar la catalogación: {user_context.strip()}"
+            #     prompt_dict = f"""
+            #     Muestra de la tabla (formato JSON):
+            #     {json.dumps(muestra_tabla, ensure_ascii=False)}
+            #     """
+            #     response = client.responses.parse(
+            #         model="gpt-4o-mini",
+            #         input=[
+            #             {"role": "system", "content": system_msg},
+            #             {"role": "user", "content": prompt_dict}
+            #         ],
+            #         text_format=TableMetadata,
+            #     )
+            #     dict_ia = response.output_parsed.dict()
             for i, col in enumerate(dict_ia.get("columns", [])):
                 id_atributo = f"a{str(i+1).zfill(3)}"
                 diccionarios_list.append({
@@ -398,16 +424,16 @@ if 'metadatos_list' in st.session_state and st.session_state['metadatos_list']:
     df_file_table_attrs = pd.DataFrame(diccionarios_list).groupby(['file_name','table_name']).agg({'Atributo':'count'}).reset_index().rename(columns={'Atributo':'Nro_atributos'})
     tabla2_html = df_to_html_table(df_file_table_attrs)
 
-    df_id = metadatos_edit[['file_name','table_name','Columna_ID']].rename(columns={'Columna_ID':'ID_identificado'})
-    # Agregar estilos de color según el valor de ID_identificado
+    df_id = metadatos_edit[['file_name','table_name','Columna_ID']].rename(columns={'Columna_ID':'ID_identificador'})
+    # Agregar estilos de color según el valor de ID_identificador
     def color_id(val):
         if val == "No tiene":
             return 'background-color: #ffcccc; border: 2px solid black !important;'  # rojo claro + borde negro
         else:
             return 'background-color: #ccffcc; border: 2px solid black !important;'  # verde claro + borde negro
 
-    # Aplicar estilos solo a la columna ID_identificado
-    styled_df_id = df_id.style.applymap(color_id, subset=['ID_identificado'])
+    # Aplicar estilos solo a la columna ID_identificador
+    styled_df_id = df_id.style.applymap(color_id, subset=['ID_identificador'])
     # Convertir a HTML con estilos embebidos y bordes negros
     tabla3_html = styled_df_id.to_html(
         index=False,
@@ -442,7 +468,7 @@ if 'metadatos_list' in st.session_state and st.session_state['metadatos_list']:
 
     FECHA_GENERACION = date.today().strftime('%d/%m/%Y')
     NUM_TABLAS = metadatos_edit['table_name'].nunique()
-    NUM_ATRIBUTOS = df_dicc['Atributo'].nunique()
+    NUM_ATRIBUTOS = df_dicc['Atributo'].shape[0] # .nunique()
 
     markdown_report = f"""
 ---
@@ -460,7 +486,7 @@ Durante el proceso se analizaron <b>{NUM_TABLAS}</b> tablas que contienen <b>{NU
 
 ---
 
-### III. Resultados detallados
+### II. Resultados detallados
 
 1. <b>Descripciones generadas</b>
 
@@ -482,7 +508,7 @@ Durante el proceso se analizaron <b>{NUM_TABLAS}</b> tablas que contienen <b>{NU
 
 ---
 
-### IV. Recomendaciones inmediatas
+### III. Recomendaciones inmediatas
 
 1. <b>Validar descripciones</b>: Revisar y aprobar las descripciones generadas para asegurar precisión semántica y alineación con el glosario corporativo.
 2. <b>Crear/normalizar IDs</b>: Asignar identificadores únicos a las tablas que carecen de ellos para garantizar trazabilidad.
@@ -491,7 +517,7 @@ Durante el proceso se analizaron <b>{NUM_TABLAS}</b> tablas que contienen <b>{NU
 
 ---
 
-### V. Próximos pasos
+### IV. Próximos pasos
 
 <table class="black-border-table">
 <thead>
@@ -520,7 +546,7 @@ Durante el proceso se analizaron <b>{NUM_TABLAS}</b> tablas que contienen <b>{NU
 
 ---
 
-### VI. Anexos
+### V. Anexos
 
 <ul>
 <li><b>A1. Metadatos y Diccionario de datos</b></li>
